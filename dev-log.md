@@ -45,6 +45,3 @@ real small repo before trusting anything downstream. Opened the
 resulting SQLite file directly and inspected rows rather than assuming
 the insert logic worked.
 
-**Still open:** confirm `pytest tests/test_api.py` passes and that
-GitHub Actions is green with today's additions before calling Day 2
-closed.
