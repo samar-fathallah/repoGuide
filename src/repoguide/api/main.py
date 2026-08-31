@@ -10,7 +10,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from repoguide.chunking.ast_chunker import chunk_file
+from repoguide.indexing import repo_registry
 from repoguide.indexing.structural_index import build_index
+from repoguide.indexing.vector_store import add_chunks, get_or_create_collection
 
 app = FastAPI(
     title="repoGuide",
@@ -65,11 +67,19 @@ def index_repository(request: IndexRequest) -> IndexResponse:
 
     - **Semantic index**: splits each file into AST-aware chunks (one per
       top-level function/class/method) using the Day 1 chunker
-      (`repoguide.chunking.ast_chunker`).
+      (`repoguide.chunking.ast_chunker`), embeds them with
+      `repoguide.indexing.vector_store`, and stores them in a persistent
+      Chroma collection at `data/indices/<repo_id>/chroma/`, isolated per
+      repository.
     - **Structural index**: extracts definitions, imports, and call sites
       with `repoguide.indexing.structural_index` and persists them to a
       SQLite database at `data/indices/<repo_id>/structural.db`, isolated
       per repository so re-indexing one repo never touches another's data.
+
+    Also records/refreshes this repo's entry (repo_path, last_indexed_at)
+    in the repo registry at `data/indices/repos.json`
+    (`repoguide.indexing.repo_registry`), so tools that only know a
+    repo_id can resolve it back to a filesystem path.
 
     Returns a 404 if `repo_path` does not exist or is not a directory.
     """
@@ -84,9 +94,12 @@ def index_repository(request: IndexRequest) -> IndexResponse:
 
     python_files = sorted(repo_path.rglob("*.py"))
 
+    collection = get_or_create_collection(request.repo_id, indices_dir=INDICES_DIR)
     chunks_created = 0
     for file_path in python_files:
-        chunks_created += len(chunk_file(file_path))
+        chunks = chunk_file(file_path)
+        add_chunks(collection, str(file_path), chunks)
+        chunks_created += len(chunks)
 
     db_path = INDICES_DIR / request.repo_id / "structural.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +107,8 @@ def index_repository(request: IndexRequest) -> IndexResponse:
 
     with sqlite3.connect(db_path) as conn:
         symbols_found = conn.execute("SELECT COUNT(*) FROM definitions").fetchone()[0]
+
+    repo_registry.upsert_repo(request.repo_id, repo_path, indices_dir=INDICES_DIR)
 
     elapsed_seconds = time.perf_counter() - start_time
 

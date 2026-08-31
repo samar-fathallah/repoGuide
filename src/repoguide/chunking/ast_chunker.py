@@ -20,8 +20,12 @@ FunctionNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
 
 # Rough heuristic (~4 characters per token) used only to decide when a
 # chunk needs to be split further; no tokenizer dependency is required.
+# This undercounts real tokens for dense, punctuation-heavy code (a chunk
+# estimated under budget here has been observed to be several thousand
+# real tokens), so the budget below is kept well under the embedding
+# model's actual limit to leave headroom for that error.
 CHARS_PER_TOKEN = 4
-MAX_CHUNK_TOKENS = 1500
+MAX_CHUNK_TOKENS = 400
 SPLIT_OVERLAP_LINES = 10
 
 
@@ -61,16 +65,15 @@ def chunk_source(source: str, file_path: str) -> List[Chunk]:
             return
         start_line = _start_line(pending_module_stmts[0])
         end_line = pending_module_stmts[-1].end_lineno
-        chunks.append(
-            Chunk(
-                file_path=file_path,
-                start_line=start_line,
-                end_line=end_line,
-                symbol_name=None,
-                symbol_type="module",
-                class_name=None,
-                text=_extract(lines, start_line, end_line),
-            )
+        _chunk_span(
+            file_path=file_path,
+            lines=lines,
+            start_line=start_line,
+            end_line=end_line,
+            symbol_name=None,
+            symbol_type="module",
+            class_name=None,
+            chunks=chunks,
         )
         pending_module_stmts.clear()
 
@@ -143,10 +146,35 @@ def _chunk_function(
 ) -> None:
     start_line = _start_line(node)
     end_line = node.end_lineno
-    text = _extract(lines, start_line, end_line)
     symbol_name = _qualified_name(class_stack, node.name)
     symbol_type = "method" if is_method else "function"
     class_name = ".".join(class_stack) or None
+
+    _chunk_span(
+        file_path=file_path,
+        lines=lines,
+        start_line=start_line,
+        end_line=end_line,
+        symbol_name=symbol_name,
+        symbol_type=symbol_type,
+        class_name=class_name,
+        chunks=chunks,
+    )
+
+
+def _chunk_span(
+    file_path: str,
+    lines: List[str],
+    start_line: int,
+    end_line: int,
+    symbol_name: Optional[str],
+    symbol_type: str,
+    class_name: Optional[str],
+    chunks: List[Chunk],
+) -> None:
+    """Append one chunk for [start_line, end_line], splitting it into
+    overlapping sub-chunks first if its text exceeds MAX_CHUNK_TOKENS."""
+    text = _extract(lines, start_line, end_line)
 
     if estimate_tokens(text) <= MAX_CHUNK_TOKENS:
         chunks.append(
@@ -162,8 +190,8 @@ def _chunk_function(
         )
         return
 
-    func_lines = lines[start_line - 1 : end_line]
-    spans = _split_lines_with_overlap(func_lines, MAX_CHUNK_TOKENS, SPLIT_OVERLAP_LINES)
+    span_lines = lines[start_line - 1 : end_line]
+    spans = _split_lines_with_overlap(span_lines, MAX_CHUNK_TOKENS, SPLIT_OVERLAP_LINES)
     for index, (span_start, span_end) in enumerate(spans):
         chunks.append(
             Chunk(
@@ -173,7 +201,7 @@ def _chunk_function(
                 symbol_name=symbol_name,
                 symbol_type=symbol_type,
                 class_name=class_name,
-                text="".join(func_lines[span_start : span_end + 1]),
+                text="".join(span_lines[span_start : span_end + 1]),
                 is_split=True,
                 part_index=index + 1,
                 part_count=len(spans),

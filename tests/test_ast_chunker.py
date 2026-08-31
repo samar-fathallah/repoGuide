@@ -111,3 +111,25 @@ def test_oversized_function_is_split_into_overlapping_flagged_subchunks():
 
     module_chunk = next(c for c in chunks if c.symbol_type == "module")
     assert not module_chunk.is_split
+
+
+def test_oversized_module_block_is_split_into_overlapping_flagged_subchunks():
+    chunks = chunk_file(FIXTURES_DIR / "oversized_module_block.py")
+
+    assert all(c.symbol_type == "module" for c in chunks)
+    assert len(chunks) > 1
+    assert all(c.is_split for c in chunks)
+    assert all(c.symbol_name is None and c.class_name is None for c in chunks)
+    assert all(c.part_count == len(chunks) for c in chunks)
+    assert [c.part_index for c in chunks] == list(range(1, len(chunks) + 1))
+
+    # Parts are contiguous/overlapping and cover the whole module body.
+    assert chunks[0].start_line == 1
+    assert chunks[-1].end_line == 403
+    for earlier, later in zip(chunks, chunks[1:]):
+        assert later.start_line <= earlier.end_line
+        assert later.start_line > earlier.start_line
+
+    from repoguide.chunking.ast_chunker import MAX_CHUNK_TOKENS, estimate_tokens
+
+    assert all(estimate_tokens(c.text) <= MAX_CHUNK_TOKENS * 1.1 for c in chunks)
