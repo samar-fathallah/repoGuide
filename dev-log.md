@@ -45,3 +45,56 @@ real small repo before trusting anything downstream. Opened the
 resulting SQLite file directly and inspected rows rather than assuming
 the insert logic worked.
 
+
+## 2026-08-29 — Day 3: Vector store, search_code / get_file_tree / read_file_section
+
+**Asked for:** wire Chroma into the indexing pipeline using a local,
+code-aware embedding model (deliberately no API key, so the "clone and
+run from the README" requirement still holds); implement and test
+search_code, get_file_tree, and read_file_section; close a test-
+coverage gap once it was found.
+
+**Claude did:** built repo-scoped Chroma collections mirroring the
+SQLite repo-scoping pattern from Day 2; used upsert with a delete-first
+step for re-indexing, which turned out to be more robust than plain
+add — it correctly handles a chunk's line range shifting between runs,
+not just simple re-run duplication. Added a JSON repo registry
+(repo_id -> original path) unprompted-but-necessary, to give
+get_file_tree and read_file_section something to resolve paths
+against, and split the "path escapes the repo root" test into
+relative-traversal and absolute-path cases on its own initiative.
+
+**Needed correction — three real bugs, all found by actually running
+the system against a real repo (SparseDrive), not by reading code:**
+
+1. `flush_module_block()` in the chunker had no size check at all,
+   unlike the function-chunking path — so an oversized module-level
+   block (a 776-line ML config file with no functions/classes) became
+   one giant, unsplit chunk. Found by inspecting real search results
+   and noticing a suspiciously huge single match.
+2. Even after fixing #1, `vector_store.py`'s `_metadata()` silently
+   dropped `is_split` / `part_index` / `part_count` on the way into
+   Chroma — so there was no way to confirm a retrieved chunk was
+   actually a fragment of something larger.
+3. The chunker's token-size estimate (`len(text) / 4`) badly
+   undercounted real tokens for dense, punctuation-heavy code. A
+   single long chunk caused a CPU out-of-memory crash during
+   embedding, since self-attention memory scales with sequence length
+   squared. Confirmed the exact mechanism with a live token count
+   against the real model's tokenizer rather than guessing. Fixed with
+   a hard safety cap on the model's max sequence length (truncate with
+   a logged warning, never crash) plus a more conservative chunk-size
+   threshold.
+
+**Also closed:** `vector_store.py` had zero automated test coverage,
+despite being where two of the three bugs above actually lived —
+added dependency injection (an optional embedding_function parameter)
+so tests can use a lightweight fake embedder instead of downloading
+and running the real model, keeping the suite fast and offline.
+
+**Verified by hand:** ran raw queries directly against the real
+indexed repo after each fix, not just unit tests in isolation; used
+`model.tokenizer` to measure real token counts and confirm the OOM
+root cause before proposing a fix; re-ran the full test suite and
+confirmed all new and existing tests pass; checked GitHub Actions is
+still green with today's additions.
