@@ -1,18 +1,22 @@
-"""FastAPI app: health check plus the repository indexing endpoint."""
+"""FastAPI app: health check, repository indexing, and the ask endpoint."""
 
 from __future__ import annotations
 
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from repoguide.agent.loop import run_agent
 from repoguide.chunking.ast_chunker import chunk_file
 from repoguide.indexing import repo_registry
+from repoguide.indexing.repo_registry import UnknownRepoError
 from repoguide.indexing.structural_index import build_index
 from repoguide.indexing.vector_store import add_chunks, get_or_create_collection
+from repoguide.tools.get_file_tree import SubpathNotFoundError, get_file_tree
 
 app = FastAPI(
     title="repoGuide",
@@ -51,6 +55,44 @@ class IndexResponse(BaseModel):
         "in the structural index.",
     )
     elapsed_seconds: float = Field(..., description="Wall-clock time spent indexing, in seconds.")
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., description="Natural-language question about the repository.")
+    repo_id: str = Field(
+        ..., description="Identifier of a previously indexed repository (see POST /index)."
+    )
+
+    @field_validator("question")
+    @classmethod
+    def question_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("question must not be empty or whitespace-only")
+        return value
+
+
+class Citation(BaseModel):
+    file_path: str
+    start_line: int
+    end_line: int
+
+
+class ToolCall(BaseModel):
+    tool: str
+    arguments: dict
+    result: Any
+
+
+class AskResponse(BaseModel):
+    answer: str
+    citations: list[Citation]
+    tool_calls: list[ToolCall]
+
+
+class RepoSummary(BaseModel):
+    repo_id: str
+    repo_path: str
+    last_indexed_at: str
 
 
 @app.get("/health")
@@ -118,3 +160,67 @@ def index_repository(request: IndexRequest) -> IndexResponse:
         symbols_found=symbols_found,
         elapsed_seconds=elapsed_seconds,
     )
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask_question(request: AskRequest) -> AskResponse:
+    """Answer a natural-language question about a previously indexed repository.
+
+    Resolves `repo_id` through the repo registry first -- the same
+    `repo_registry.get_repo_path` lookup `get_file_tree` and
+    `read_file_section` already use -- so an unindexed repo_id fails fast
+    with a 404 instead of spending a model call on it. Once that resolves,
+    the question is handed to the agent loop
+    (`repoguide.agent.loop.run_agent`), which investigates the repository
+    with its tools and returns a structured answer, its supporting
+    citations, and the full ordered tool-call trace.
+
+    Returns a 404 if repo_id was never indexed via POST /index.
+    """
+    try:
+        repo_registry.get_repo_path(request.repo_id)
+    except UnknownRepoError as exc:
+        # UnknownRepoError subclasses KeyError, whose __str__ re-wraps the
+        # message in repr() (e.g. '"message"' with literal quotes) -- use
+        # the original arg directly so the 404 body stays human-readable.
+        raise HTTPException(status_code=404, detail=exc.args[0]) from exc
+
+    result = run_agent(request.repo_id, request.question)
+    return AskResponse(**result)
+
+
+@app.get("/repos", response_model=list[RepoSummary])
+def list_repos() -> list[RepoSummary]:
+    """All repositories currently in the repo registry (see POST /index).
+
+    Reads the same registry `repo_registry.get_repo_path` resolves repo_id
+    against, just returned as a list instead of the raw {repo_id: {...}}
+    dict. Returns an empty list if nothing has been indexed yet -- that's
+    a normal state, not an error.
+    """
+    registry = repo_registry.load_registry()
+    return [RepoSummary(repo_id=repo_id, **entry) for repo_id, entry in registry.items()]
+
+
+@app.get("/repos/{repo_id}/tree")
+def repo_tree(repo_id: str, path: Optional[str] = None) -> dict:
+    """Directory structure of an indexed repository, optionally scoped to a subdirectory.
+
+    Delegates entirely to the get_file_tree tool -- the same function the
+    agent calls internally -- so this route returns exactly what that tool
+    returns, with one definition of "file tree" in the codebase. `path`,
+    if given, is forwarded as get_file_tree's `subpath` argument to browse
+    a subdirectory instead of the whole repo.
+
+    Returns a 404 if repo_id was never indexed via POST /index, or if
+    `path` doesn't exist under the repo's root.
+    """
+    try:
+        return get_file_tree(repo_id, subpath=path)
+    except UnknownRepoError as exc:
+        # See ask_question's 404 handler: UnknownRepoError subclasses
+        # KeyError, whose __str__ re-wraps the message in repr() -- use
+        # the original arg directly so the 404 body stays human-readable.
+        raise HTTPException(status_code=404, detail=exc.args[0]) from exc
+    except SubpathNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.args[0]) from exc
