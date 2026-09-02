@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+from repoguide.paths import relative_to_repo_root
+
 FunctionNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
 
 # Rough heuristic (~4 characters per token) used only to decide when a
@@ -47,10 +49,21 @@ def estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text) / CHARS_PER_TOKEN))
 
 
-def chunk_file(file_path: Union[str, Path]) -> List[Chunk]:
+def chunk_file(
+    file_path: Union[str, Path], repo_root: Optional[Union[str, Path]] = None
+) -> List[Chunk]:
+    """Chunk the file at `file_path`.
+
+    If `repo_root` is given, chunks are labeled with `file_path` made
+    relative to it (e.g. "pkg/module.py") instead of the raw path used to
+    read the file -- callers indexing a whole repository should always
+    pass this, so stored metadata doesn't leak the local filesystem
+    layout. Omit it only for standalone use with no repo root concept.
+    """
     path = Path(file_path)
     source = path.read_text(encoding="utf-8")
-    return chunk_source(source, str(file_path))
+    label = relative_to_repo_root(path, repo_root) if repo_root is not None else str(file_path)
+    return chunk_source(source, label)
 
 
 def chunk_source(source: str, file_path: str) -> List[Chunk]:

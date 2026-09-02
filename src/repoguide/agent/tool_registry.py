@@ -29,7 +29,11 @@ SEARCH_CODE_SCHEMA: Dict[str, Any] = {
     "description": (
         "Semantic search over the repository's indexed code chunks. Use this "
         "to find code relevant to a natural-language description of "
-        "functionality, even when you don't know exact symbol or file names."
+        "functionality, even when you don't know exact symbol or file names. "
+        "Results longer than ~20 lines come back as a truncated preview "
+        "(flagged \"truncated\": true, with start_line/end_line still accurate) "
+        "rather than the full body -- once you've found the right location, "
+        "call read_file_section with those line numbers to get the complete code."
     ),
     "input_schema": {
         "type": "object",
@@ -51,7 +55,12 @@ GET_FILE_TREE_SCHEMA: Dict[str, Any] = {
     "name": "get_file_tree",
     "description": (
         "Directory structure of the repository, optionally scoped to a "
-        "subpath. Use this to orient yourself in the repo's layout."
+        "subpath. Use this to orient yourself in the repo's layout. The "
+        "default view (no subpath) is shallow: directories more than a few "
+        "levels deep are listed with \"truncated\": true instead of being "
+        "expanded. Pass subpath with the path of a directory you want to see "
+        "more of -- including one that came back truncated -- to drill in "
+        "and get a full view starting from there."
     ),
     "input_schema": {
         "type": "object",

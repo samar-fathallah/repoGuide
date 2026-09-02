@@ -5,17 +5,19 @@ Each repository gets its own persistent Chroma client rooted at
 collections are never shared and a search against one repo can never
 return another repo's chunks.
 
-Chunks are embedded with the `jinaai/jina-embeddings-v2-base-code` model
-(via `sentence-transformers`), chosen for its training on source code
-rather than prose. Each chunk gets a deterministic ID derived from its
-file path and line range (e.g. "file.py:10-25"), so re-indexing a file
-is idempotent: `add_chunks` deletes that file's existing rows before
+Chunks are embedded with the `sentence-transformers/all-MiniLM-L6-v2`
+model. An earlier version used `jinaai/jina-embeddings-v2-base-code` for
+its code-specific training, but that model hit a ~2.3GB single CPU
+memory allocation during smoke testing on real hardware; all-MiniLM-L6-v2
+trades some code-specific embedding quality for a footprint small enough
+to actually run there. Each chunk gets a deterministic ID derived from
+its file path and line range (e.g. "file.py:10-25"), so re-indexing a
+file is idempotent: `add_chunks` deletes that file's existing rows before
 inserting the freshly computed ones instead of appending duplicates.
 """
 
 from __future__ import annotations
 
-import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -26,57 +28,53 @@ from chromadb.api.models.Collection import Collection
 
 from repoguide.chunking.ast_chunker import Chunk
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_INDICES_DIR = Path("data/indices")
 COLLECTION_NAME = "chunks"
-EMBEDDING_MODEL_NAME = "jinaai/jina-embeddings-v2-base-code"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Conservative cap on the model's max sequence length. The model itself
-# supports much longer sequences, but running a full forward pass on an
-# enormous, un-truncated chunk risks an out-of-memory crash; capping it
-# here makes sentence-transformers truncate instead.
-MAX_SEQ_LENGTH = 2048
+# Keeps memory usage predictable regardless of how many chunks happen to
+# get passed to add_chunks at once, rather than scaling with batch size.
+EMBEDDING_BATCH_SIZE = 8
 
 
-class JinaCodeEmbeddingFunction(EmbeddingFunction):
-    """Wraps the jina-embeddings-v2-base-code sentence-transformers model."""
+class MiniLMEmbeddingFunction(EmbeddingFunction):
+    """Wraps the sentence-transformers/all-MiniLM-L6-v2 model.
+
+    Unlike the jina-embeddings-v2-base-code model this replaced, MiniLM is
+    a standard sentence-transformers model with no custom modeling code,
+    so it doesn't need `trust_remote_code=True`. It's also small enough
+    (22M params, vs. jina's ~161M) that the max_seq_length cap jina needed
+    to avoid an out-of-memory crash isn't a comparable risk here, so this
+    just uses the model's own default instead of forcing one.
+    """
 
     def __init__(self, model_name: str = EMBEDDING_MODEL_NAME) -> None:
         from sentence_transformers import SentenceTransformer
 
         self._model_name = model_name
-        self._model = SentenceTransformer(model_name, trust_remote_code=True)
-        self._model.max_seq_length = MAX_SEQ_LENGTH
+        self._model = SentenceTransformer(model_name)
 
     def __call__(self, input: Documents) -> Embeddings:
-        for text in input:
-            token_count = len(self._model.tokenizer.encode(text))
-            if token_count > MAX_SEQ_LENGTH:
-                logger.warning(
-                    "Chunk has %d tokens, exceeding max_seq_length=%d; it will be "
-                    "truncated before embedding.",
-                    token_count,
-                    MAX_SEQ_LENGTH,
-                )
-        return self._model.encode(list(input), convert_to_numpy=True).tolist()
+        return self._model.encode(
+            list(input), convert_to_numpy=True, batch_size=EMBEDDING_BATCH_SIZE
+        ).tolist()
 
     @staticmethod
     def name() -> str:
-        return "jina-embeddings-v2-base-code"
+        return "all-MiniLM-L6-v2"
 
     def get_config(self) -> Dict[str, Any]:
         return {"model_name": self._model_name}
 
     @staticmethod
-    def build_from_config(config: Dict[str, Any]) -> "JinaCodeEmbeddingFunction":
-        return JinaCodeEmbeddingFunction(model_name=config["model_name"])
+    def build_from_config(config: Dict[str, Any]) -> "MiniLMEmbeddingFunction":
+        return MiniLMEmbeddingFunction(model_name=config["model_name"])
 
 
 @lru_cache(maxsize=1)
-def _get_embedding_function() -> JinaCodeEmbeddingFunction:
+def _get_embedding_function() -> MiniLMEmbeddingFunction:
     """Load the embedding model once and reuse it across collections."""
-    return JinaCodeEmbeddingFunction()
+    return MiniLMEmbeddingFunction()
 
 
 def get_or_create_collection(
@@ -90,8 +88,8 @@ def get_or_create_collection(
     a directory distinct per repo_id, so different repos never share a
     collection or return each other's chunks in search results.
 
-    `embedding_function` defaults to the real jina-embeddings-v2-base-code
-    model; tests can inject a lightweight fake instead to avoid loading it.
+    `embedding_function` defaults to the real all-MiniLM-L6-v2 model;
+    tests can inject a lightweight fake instead to avoid loading it.
     """
     if embedding_function is None:
         embedding_function = _get_embedding_function()

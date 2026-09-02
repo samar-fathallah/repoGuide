@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -61,6 +63,36 @@ def test_index_valid_repo_returns_populated_counts(tmp_path):
     assert body["chunks_created"] > 0
     assert body["symbols_found"] > 0
     assert body["elapsed_seconds"] > 0
+
+
+def test_index_stores_repo_relative_paths_not_absolute(tmp_path):
+    # Regression test: file_path metadata in both indices must be relative
+    # to the repo root, not the absolute path repo_path happened to be
+    # passed in as -- an absolute path leaks local machine structure and
+    # won't resolve if the repo is indexed again elsewhere.
+    repo_dir = _make_sample_repo(tmp_path)
+    nested_dir = repo_dir / "pkg"
+    nested_dir.mkdir()
+    (nested_dir / "nested.py").write_text("def nested_func():\n    return 1\n", encoding="utf-8")
+
+    response = client.post("/index", json={"repo_path": str(repo_dir), "repo_id": "relpath-repo"})
+    assert response.status_code == 200
+
+    collection = main_module.get_or_create_collection(
+        "relpath-repo", indices_dir=main_module.INDICES_DIR
+    )
+    chroma_paths = {m["file_path"] for m in collection.get(include=["metadatas"])["metadatas"]}
+    assert chroma_paths == {"module_a.py", "module_b.py", "pkg/nested.py"}
+
+    db_path = main_module.INDICES_DIR / "relpath-repo" / "structural.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        structural_paths = {
+            row[0] for row in conn.execute("SELECT DISTINCT file_path FROM definitions")
+        }
+    finally:
+        conn.close()
+    assert structural_paths == {"module_a.py", "module_b.py", "pkg/nested.py"}
 
 
 def test_index_nonexistent_repo_path_returns_404_not_500(tmp_path):

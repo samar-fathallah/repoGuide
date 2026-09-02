@@ -12,6 +12,7 @@ uncooperative model from looping forever.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List
 
 import anthropic
@@ -60,7 +61,11 @@ def run_agent(repo_id: str, question: str) -> Dict[str, Any]:
     If the model doesn't call submit_answer within MAX_ITERATIONS turns,
     returns a clear "couldn't complete" answer instead of looping forever.
     """
-    client = anthropic.Anthropic()
+    workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    client = anthropic.Anthropic(
+        default_headers={"anthropic-workspace-id": workspace_id} if workspace_id else {},
+    )
+
     messages: List[Dict[str, Any]] = [{"role": "user", "content": question}]
     tool_calls: List[Dict[str, Any]] = []
 

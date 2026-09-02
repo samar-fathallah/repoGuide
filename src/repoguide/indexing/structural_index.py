@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
+from repoguide.paths import relative_to_repo_root
+
 FunctionNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
 
 SCHEMA_SQL = """
@@ -110,10 +112,21 @@ def extract_structural_data(source: str, file_path: str) -> StructuralData:
     )
 
 
-def index_file(file_path: Union[str, Path]) -> StructuralData:
+def index_file(
+    file_path: Union[str, Path], repo_root: Optional[Union[str, Path]] = None
+) -> StructuralData:
+    """Extract structural data from the file at `file_path`.
+
+    If `repo_root` is given, entries are labeled with `file_path` made
+    relative to it (e.g. "pkg/module.py") instead of the raw path used to
+    read the file -- callers indexing a whole repository should always
+    pass this, so stored metadata doesn't leak the local filesystem
+    layout. Omit it only for standalone use with no repo root concept.
+    """
     path = Path(file_path)
     source = path.read_text(encoding="utf-8")
-    return extract_structural_data(source, str(file_path))
+    label = relative_to_repo_root(path, repo_root) if repo_root is not None else str(file_path)
+    return extract_structural_data(source, label)
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
@@ -155,7 +168,11 @@ def delete_rows_for_file(conn: sqlite3.Connection, file_path: str) -> None:
     conn.execute("DELETE FROM calls WHERE file_path = ?", (file_path,))
 
 
-def build_index(file_paths: Sequence[Union[str, Path]], db_path: Union[str, Path]) -> None:
+def build_index(
+    file_paths: Sequence[Union[str, Path]],
+    db_path: Union[str, Path],
+    repo_root: Optional[Union[str, Path]] = None,
+) -> None:
     """Index a set of source files into a SQLite database at `db_path`.
 
     Pass a distinct `db_path` per repository (e.g.
@@ -163,15 +180,24 @@ def build_index(file_paths: Sequence[Union[str, Path]], db_path: Union[str, Path
     and overwrite each other's index. Re-indexing a file that was already
     indexed into this database replaces its rows rather than duplicating
     them.
+
+    Pass `repo_root` (the repository's root directory) when indexing a
+    whole repository, so stored rows are labeled with paths relative to
+    it instead of the raw filesystem paths in `file_paths` -- see
+    index_file.
     """
     conn = sqlite3.connect(db_path)
     try:
         create_schema(conn)
         with conn:
             for file_path in file_paths:
-                path_str = str(file_path)
-                delete_rows_for_file(conn, path_str)
-                store_structural_data(conn, index_file(file_path))
+                label = (
+                    relative_to_repo_root(file_path, repo_root)
+                    if repo_root is not None
+                    else str(file_path)
+                )
+                delete_rows_for_file(conn, label)
+                store_structural_data(conn, index_file(file_path, repo_root=repo_root))
     finally:
         conn.close()
 

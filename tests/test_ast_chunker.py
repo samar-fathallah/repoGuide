@@ -6,7 +6,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def test_nested_class_produces_chunks_for_both_class_levels_and_their_methods():
-    chunks = chunk_file(FIXTURES_DIR / "nested_class.py")
+    chunks = chunk_file(FIXTURES_DIR / "nested_class.py", repo_root=FIXTURES_DIR)
 
     by_symbol = {c.symbol_name: c for c in chunks if c.symbol_type in ("class", "method")}
 
@@ -50,7 +50,9 @@ def test_nested_class_produces_chunks_for_both_class_levels_and_their_methods():
     assert after_nested.class_name == "Outer"
 
     for chunk in chunks:
-        assert chunk.file_path == str(FIXTURES_DIR / "nested_class.py")
+        # Labeled relative to repo_root, not the absolute filesystem path
+        # the fixture happens to live at -- see repoguide.paths.
+        assert chunk.file_path == "nested_class.py"
         assert chunk.start_line <= chunk.end_line
         assert not chunk.is_split
 

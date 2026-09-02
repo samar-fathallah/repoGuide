@@ -8,7 +8,7 @@ SAMPLE_PATH = FIXTURES_DIR / "structural_sample.py"
 
 
 def _index_sample():
-    return index_file(SAMPLE_PATH)
+    return index_file(SAMPLE_PATH, repo_root=FIXTURES_DIR)
 
 
 def test_definitions_have_correct_symbol_info_and_line_ranges():
@@ -75,7 +75,9 @@ def test_definitions_have_correct_symbol_info_and_line_ranges():
     assert (handler.start_line, handler.end_line) == (30, 32)
 
     for definition in data.definitions:
-        assert definition.file_path == str(SAMPLE_PATH)
+        # Labeled relative to repo_root, not the absolute filesystem path
+        # the fixture happens to live at -- see repoguide.paths.
+        assert definition.file_path == "structural_sample.py"
 
 
 def test_imports_capture_module_imported_name_alias_and_relative_dots():
@@ -136,8 +138,8 @@ def test_call_inside_decorator_is_attributed_to_enclosing_scope_not_decorated_me
 
 def test_extract_structural_data_matches_index_file():
     source = SAMPLE_PATH.read_text(encoding="utf-8")
-    via_extract = extract_structural_data(source, str(SAMPLE_PATH))
-    via_index_file = index_file(SAMPLE_PATH)
+    via_extract = extract_structural_data(source, "structural_sample.py")
+    via_index_file = index_file(SAMPLE_PATH, repo_root=FIXTURES_DIR)
 
     assert via_extract.definitions == via_index_file.definitions
     assert via_extract.imports == via_index_file.imports

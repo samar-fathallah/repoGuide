@@ -83,3 +83,44 @@ def test_get_file_tree_nonexistent_subpath_raises_clear_error(tmp_path):
 
     with pytest.raises(SubpathNotFoundError, match="does/not/exist"):
         get_file_tree("sample-repo", subpath="does/not/exist")
+
+
+def _make_deeply_nested_repo(tmp_path) -> Path:
+    repo_dir = tmp_path / "deep_repo"
+    deepest = repo_dir / "a" / "b" / "c" / "d"
+    deepest.mkdir(parents=True)
+    (deepest / "file.py").write_text("x = 1\n", encoding="utf-8")
+    return repo_dir
+
+
+def test_get_file_tree_truncates_directories_past_the_depth_limit(tmp_path):
+    repo_dir = _make_deeply_nested_repo(tmp_path)
+    repo_registry.upsert_repo("deep-repo", repo_dir)
+
+    tree = get_file_tree("deep-repo")
+
+    # root(0) -> a(1) -> b(2) -> c(3, truncated) -- d and file.py never appear.
+    a = next(c for c in tree["children"] if c["name"] == "a")
+    assert "truncated" not in a
+    b = next(c for c in a["children"] if c["name"] == "b")
+    assert "truncated" not in b
+    c = next(c for c in b["children"] if c["name"] == "c")
+    assert c == {"name": "c", "type": "directory", "truncated": True}
+    assert "children" not in c
+
+
+def test_get_file_tree_subpath_gets_a_fresh_depth_budget_past_a_truncated_directory(tmp_path):
+    repo_dir = _make_deeply_nested_repo(tmp_path)
+    repo_registry.upsert_repo("deep-repo", repo_dir)
+
+    # "c" showed up truncated from the root; drilling into it directly
+    # should expand it fully rather than truncating again immediately.
+    tree = get_file_tree("deep-repo", subpath="a/b/c")
+
+    assert tree["name"] == "c"
+    assert tree["type"] == "directory"
+    d = next(child for child in tree["children"] if child["name"] == "d")
+    assert d["type"] == "directory"
+    assert "truncated" not in d
+    file_names = {child["name"] for child in d["children"]}
+    assert file_names == {"file.py"}

@@ -16,6 +16,7 @@ from repoguide.indexing import repo_registry
 from repoguide.indexing.repo_registry import UnknownRepoError
 from repoguide.indexing.structural_index import build_index
 from repoguide.indexing.vector_store import add_chunks, get_or_create_collection
+from repoguide.paths import relative_to_repo_root
 from repoguide.tools.get_file_tree import SubpathNotFoundError, get_file_tree
 
 app = FastAPI(
@@ -139,13 +140,14 @@ def index_repository(request: IndexRequest) -> IndexResponse:
     collection = get_or_create_collection(request.repo_id, indices_dir=INDICES_DIR)
     chunks_created = 0
     for file_path in python_files:
-        chunks = chunk_file(file_path)
-        add_chunks(collection, str(file_path), chunks)
+        relative_path = relative_to_repo_root(file_path, repo_path)
+        chunks = chunk_file(file_path, repo_root=repo_path)
+        add_chunks(collection, relative_path, chunks)
         chunks_created += len(chunks)
 
     db_path = INDICES_DIR / request.repo_id / "structural.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    build_index(python_files, db_path)
+    build_index(python_files, db_path, repo_root=repo_path)
 
     with sqlite3.connect(db_path) as conn:
         symbols_found = conn.execute("SELECT COUNT(*) FROM definitions").fetchone()[0]

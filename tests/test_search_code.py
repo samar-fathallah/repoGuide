@@ -126,3 +126,73 @@ def test_search_code_returns_fewer_than_k_when_collection_has_fewer_chunks(monke
         "code": "x = 1\n",
         "distance": 0.9,
     }
+
+
+def test_search_code_leaves_small_chunk_untouched(monkeypatch):
+    small_code = "def foo():\n    return 1\n"
+    response = {
+        "ids": [["small.py:1-2"]],
+        "documents": [[small_code]],
+        "metadatas": [
+            [
+                {
+                    "file_path": "small.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "symbol_name": "foo",
+                    "symbol_type": "function",
+                    "enclosing_class": "",
+                    "is_split": False,
+                    "part_index": 0,
+                    "part_count": 0,
+                }
+            ]
+        ],
+        "distances": [[0.1]],
+    }
+    _patch_collection(monkeypatch, FakeCollection(response))
+
+    results = search_code("sample-repo", "foo", k=1)
+
+    assert results[0]["code"] == small_code
+    assert "truncated" not in results[0]
+
+
+def test_search_code_truncates_large_chunk_but_keeps_accurate_line_numbers(monkeypatch):
+    long_code = "".join(f"line {i}\n" for i in range(1, 31))  # 30 lines, over the threshold
+    response = {
+        "ids": [["big.py:1-30"]],
+        "documents": [[long_code]],
+        "metadatas": [
+            [
+                {
+                    "file_path": "big.py",
+                    "start_line": 1,
+                    "end_line": 30,
+                    "symbol_name": "big_function",
+                    "symbol_type": "function",
+                    "enclosing_class": "",
+                    "is_split": False,
+                    "part_index": 0,
+                    "part_count": 0,
+                }
+            ]
+        ],
+        "distances": [[0.2]],
+    }
+    _patch_collection(monkeypatch, FakeCollection(response))
+
+    results = search_code("sample-repo", "big function", k=1)
+
+    assert len(results) == 1
+    result = results[0]
+    # start_line/end_line reflect the full chunk regardless of truncation --
+    # that's what makes the read_file_section follow-up call possible.
+    assert result["file_path"] == "big.py"
+    assert result["start_line"] == 1
+    assert result["end_line"] == 30
+    assert result["truncated"] is True
+    assert "line 1\n" in result["code"]
+    assert "line 20\n" in result["code"]
+    assert "line 21\n" not in result["code"]
+    assert 'read_file_section("big.py", 1, 30)' in result["code"]
